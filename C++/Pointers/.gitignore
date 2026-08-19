@@ -1,0 +1,6 @@
+# CMake build directories
+/build*/
+/cmake-build-*/
+
+# Compiler output
+a.out

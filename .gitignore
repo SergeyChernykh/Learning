@@ -1,0 +1,9 @@
+# Generated CMake build trees
+**/build/
+**/build-*/
+**/cmake-build-*/
+
+# Compiler output
+**/a.out
+*.o
+

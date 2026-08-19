@@ -6,6 +6,7 @@ include(CTest)
 find_package(Threads REQUIRED)
 
 option(ENABLE_TSAN "Build the tests with ThreadSanitizer" ON)
+option(ENABLE_ASAN "Build the tests with AddressSanitizer and LeakSanitizer" OFF)
 option(BUILD_BENCHMARKS "Build TStack microbenchmarks" ON)
 option(TSAN_DISABLE_ASLR
     "Run TSAN tests with ASLR disabled to avoid shadow-memory mapping conflicts"
@@ -20,6 +21,24 @@ if(BUILD_BENCHMARKS)
     add_executable(tstack_benchmarks benchmarks/tstack_benchmarks.cpp)
     target_compile_features(tstack_benchmarks PRIVATE cxx_std_17)
     target_link_libraries(tstack_benchmarks PRIVATE Threads::Threads)
+endif()
+
+if(ENABLE_ASAN)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_executable(tstack_tests_asan tests/tstack_tests.cpp)
+        target_compile_features(tstack_tests_asan PRIVATE cxx_std_17)
+        target_link_libraries(tstack_tests_asan PRIVATE Threads::Threads)
+        target_compile_options(tstack_tests_asan PRIVATE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+            -g
+        )
+        target_link_options(tstack_tests_asan PRIVATE
+            -fsanitize=address,undefined
+        )
+    else()
+        message(FATAL_ERROR "ENABLE_ASAN requires GCC or Clang")
+    endif()
 endif()
 
 if(ENABLE_TSAN)
@@ -78,6 +97,9 @@ set(TSTACK_TEST_SCENARIOS
     empty
     lifo
     reuse_after_empty
+    destructor_reclaims_remaining_nodes
+    pop_reclaims_node_before_stack_destruction
+    concurrent_pop_reclaims_all_nodes
     concurrent_push
     concurrent_pop
     concurrent_push_pop
@@ -88,5 +110,12 @@ foreach(scenario IN LISTS TSTACK_TEST_SCENARIOS)
 
     if(ENABLE_TSAN)
         add_tstack_tsan_test("${scenario}")
+    endif()
+
+    if(ENABLE_ASAN)
+        add_tstack_test(tstack_tests_asan tstack.asan "${scenario}")
+        set_tests_properties("tstack.asan.${scenario}" PROPERTIES
+            ENVIRONMENT "ASAN_OPTIONS=detect_leaks=1:halt_on_error=1"
+        )
     endif()
 endforeach()

@@ -14,6 +14,48 @@ namespace {
 constexpr int kThreadCount = 4;
 constexpr int kValuesPerThread = 2'000;
 
+class LifetimeTracked {
+public:
+    explicit LifetimeTracked(int value = 0) : value_(value)
+    {
+        alive_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    LifetimeTracked(const LifetimeTracked &other) : value_(other.value_)
+    {
+        alive_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    LifetimeTracked(LifetimeTracked &&other) noexcept : value_(other.value_)
+    {
+        alive_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    LifetimeTracked &operator=(const LifetimeTracked &) = default;
+    LifetimeTracked &operator=(LifetimeTracked &&) = default;
+
+    ~LifetimeTracked()
+    {
+        alive_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    int value() const
+    {
+        return value_;
+    }
+
+    static int alive()
+    {
+        return alive_.load(std::memory_order_relaxed);
+    }
+
+private:
+    int value_;
+    static std::atomic<int> alive_;
+};
+
+std::atomic<int> LifetimeTracked::alive_ {0};
+
 [[noreturn]] void fail(const std::string &message)
 {
     throw std::runtime_error(message);
@@ -60,6 +102,95 @@ void test_reuse_after_empty()
     stack.push(2);
     require(stack.try_pop() == 2, "failed to reuse the emptied stack");
     require(!stack.try_pop(), "reused stack did not become empty");
+}
+
+void test_destructor_reclaims_remaining_nodes()
+{
+    require(LifetimeTracked::alive() == 0,
+            "the lifetime counter must start at zero");
+    {
+        TStack<LifetimeTracked> stack;
+        stack.push(LifetimeTracked {1});
+        stack.push(LifetimeTracked {2});
+        stack.push(LifetimeTracked {3});
+        require(LifetimeTracked::alive() == 3,
+                "the stack must own three live values");
+    }
+    require(LifetimeTracked::alive() == 0,
+            "destroying the stack must destroy all remaining values");
+}
+
+void test_pop_reclaims_node_before_stack_destruction()
+{
+    require(LifetimeTracked::alive() == 0,
+            "the lifetime counter must start at zero");
+    {
+        TStack<LifetimeTracked> stack;
+        stack.push(LifetimeTracked {42});
+
+        {
+            const auto popped = stack.try_pop();
+            require(popped && popped->value() == 42,
+                    "try_pop() must return the stored value");
+            require(LifetimeTracked::alive() == 1,
+                    "after pop only the returned value may remain alive");
+        }
+
+        require(LifetimeTracked::alive() == 0,
+                "the retired node must be reclaimed before stack destruction");
+    }
+    require(LifetimeTracked::alive() == 0,
+            "stack destruction must not leave retired values alive");
+}
+
+void test_concurrent_pop_reclaims_all_nodes()
+{
+    require(LifetimeTracked::alive() == 0,
+            "the lifetime counter must start at zero");
+
+    TStack<LifetimeTracked> stack;
+    const int total = kThreadCount * kValuesPerThread;
+    for (int value = 0; value < total; ++value) {
+        stack.push(LifetimeTracked {value});
+    }
+    require(LifetimeTracked::alive() == total,
+            "every pushed node must own one live value");
+
+    std::vector<std::atomic<unsigned int>> seen(static_cast<std::size_t>(total));
+    for (auto &counter : seen) {
+        counter.store(0, std::memory_order_relaxed);
+    }
+    std::atomic<bool> invalid_value {false};
+    std::vector<std::thread> threads;
+
+    for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
+        threads.emplace_back([&] {
+            while (const auto value = stack.try_pop()) {
+                const int index = value->value();
+                if (index < 0 || index >= total) {
+                    invalid_value.store(true, std::memory_order_relaxed);
+                } else {
+                    seen[static_cast<std::size_t>(index)].fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+    for (auto &thread : threads) {
+        thread.join();
+    }
+
+    require(!invalid_value.load(std::memory_order_relaxed),
+            "concurrent pop returned an invalid value");
+    for (int value = 0; value < total; ++value) {
+        require(seen[static_cast<std::size_t>(value)].load(
+                    std::memory_order_relaxed) == 1,
+                "concurrent reclamation lost or duplicated a value");
+    }
+    const int unreclaimed = LifetimeTracked::alive();
+    require(unreclaimed == 0,
+            "all nodes must be reclaimed after concurrent pop becomes quiescent; "
+            "live values: " + std::to_string(unreclaimed));
 }
 
 void test_concurrent_push()
@@ -227,6 +358,12 @@ int main(int argc, char **argv)
             test_lifo();
         } else if (scenario == "reuse_after_empty") {
             test_reuse_after_empty();
+        } else if (scenario == "destructor_reclaims_remaining_nodes") {
+            test_destructor_reclaims_remaining_nodes();
+        } else if (scenario == "pop_reclaims_node_before_stack_destruction") {
+            test_pop_reclaims_node_before_stack_destruction();
+        } else if (scenario == "concurrent_pop_reclaims_all_nodes") {
+            test_concurrent_pop_reclaims_all_nodes();
         } else if (scenario == "concurrent_push") {
             test_concurrent_push();
         } else if (scenario == "concurrent_pop") {

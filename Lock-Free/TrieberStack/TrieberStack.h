@@ -8,8 +8,8 @@ class TStack {
     struct Node {
         T val;
         Node *next_;
+        Node *retired_next_;
     };
-
 public:
 
     TStack() = default;
@@ -18,12 +18,17 @@ public:
     TStack(TStack<T>&& other) = delete;
     TStack& operator=(TStack<T>&& other) = delete;
     ~TStack() {
-        retire_list(head_);
+        Node *head = head_;
+        while (head != nullptr) {
+            auto t = head;
+            head = head->next_;
+            delete t;
+        }        
         retire_list(retired_list_);
     }
 
     void push(T value) {
-        Node *node = new Node {std::move(value), nullptr};
+        Node *node = new Node {std::move(value), nullptr, nullptr};
         Node *head = head_.load(std::memory_order_relaxed);
         do {
             node->next_ = head;
@@ -38,7 +43,7 @@ public:
         do {
             head = head_.load(std::memory_order_acquire);
             if (head == nullptr) {
-                retire(head);
+                retire(nullptr);
                 return std::nullopt;
             }
             next = head->next_;
@@ -51,7 +56,7 @@ private:
     void retire_list(Node* head) {
         while (head != nullptr) {
             auto t = head;
-            head = head->next_;
+            head = head->retired_next_;
             delete t;
         }
     }
@@ -60,7 +65,7 @@ private:
         if (node != nullptr) {
             Node *rhead = retired_list_.load();
             do {
-                node->next_ = rhead;
+                node->retired_next_ = rhead;
             } while (!retired_list_.compare_exchange_weak(rhead, node));
         }
         if (active_counter_.load() == 1) {
@@ -74,12 +79,12 @@ private:
                 return;
             }
             Node* retire_it = rhead;
-            while (retire_it->next_ != nullptr) {
-                retire_it = retire_it->next_;
+            while (retire_it->retired_next_ != nullptr) {
+                retire_it = retire_it->retired_next_;
             }
             Node* new_retire_list = retired_list_.load();
             do {
-                retire_it->next_ = new_retire_list;
+                retire_it->retired_next_ = new_retire_list;
             } while (!retired_list_.compare_exchange_weak(new_retire_list, rhead));
         } else {
             active_counter_.fetch_sub(1);

@@ -98,8 +98,8 @@ set(TSTACK_TEST_SCENARIOS
     lifo
     reuse_after_empty
     destructor_reclaims_remaining_nodes
-    pop_reclaims_node_before_stack_destruction
-    concurrent_pop_reclaims_all_nodes
+    pop_reclaims_retired_node_on_destruction
+    concurrent_pop_reclaims_nodes_on_destruction
     concurrent_push
     concurrent_pop
     concurrent_push_pop

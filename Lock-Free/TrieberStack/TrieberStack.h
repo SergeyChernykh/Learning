@@ -3,12 +3,73 @@
 #include <optional>
 #include <stdexcept>
 #include <iostream>
+#include <utility>
+
 template <class T>
 class TStack {
     struct Node {
         T val;
         Node *next_;
         Node *retired_next_;
+    };
+
+    class RetireRAII {
+        public:
+        RetireRAII(std::atomic<int>& active_counter, std::atomic<Node*>& retired_list) :
+            active_counter_(active_counter),
+            retired_list_(retired_list) {
+            active_counter_.fetch_add(1);
+            }
+        RetireRAII(const RetireRAII&) = delete;
+        RetireRAII(RetireRAII&&) = delete;
+        RetireRAII& operator=(const RetireRAII&) = delete;
+        RetireRAII& operator=(RetireRAII&&) = delete;
+        void SetNode(Node* node) {
+            node_ = node;
+        }
+
+        ~RetireRAII() {
+            if (node_ != nullptr) {
+                Node *rhead = retired_list_.load();
+                do {
+                    node_->retired_next_ = rhead;
+                } while (!retired_list_.compare_exchange_weak(rhead, node_));
+            }
+            if (active_counter_.load() == 1) {
+                Node *rhead = retired_list_.exchange(nullptr);
+                int old = active_counter_.fetch_sub(1);
+                if (rhead == nullptr) {
+                    return;
+                }
+                if (old == 1) {
+                    retire_list(rhead);
+                    return;
+                }
+                Node* retire_it = rhead;
+                while (retire_it->retired_next_ != nullptr) {
+                    retire_it = retire_it->retired_next_;
+                }
+                Node* new_retire_list = retired_list_.load();
+                do {
+                    retire_it->retired_next_ = new_retire_list;
+                } while (!retired_list_.compare_exchange_weak(new_retire_list, rhead));
+            } else {
+                active_counter_.fetch_sub(1);
+            }
+        }
+        private:
+            void retire_list(Node* head) {
+                while (head != nullptr) {
+                    auto t = head;
+                    head = head->retired_next_;
+                    delete t;
+                }
+            }
+
+        private:
+            Node* node_ {nullptr};
+            std::atomic<int>& active_counter_;
+            std::atomic<Node*>& retired_list_;
     };
 public:
 
@@ -18,13 +79,23 @@ public:
     TStack(TStack<T>&& other) = delete;
     TStack& operator=(TStack<T>&& other) = delete;
     ~TStack() {
-        Node *head = head_;
-        while (head != nullptr) {
-            auto t = head;
-            head = head->next_;
-            delete t;
-        }        
-        retire_list(retired_list_);
+
+        {
+            Node *head = head_;
+            while (head != nullptr) {
+                auto t = head;
+                head = head->next_;
+                delete t;
+            }
+        }
+        {
+            Node *head = retired_list_;
+            while (head != nullptr) {
+                auto t = head;
+                head = head->retired_next_;
+                delete t;
+            }
+        }
     }
 
     void push(T value) {
@@ -37,58 +108,18 @@ public:
     }
 
     std::optional<T> try_pop() {
-        active_counter_.fetch_add(1);
+        RetireRAII retireRAII(active_counter_, retired_list_);
         Node *head = nullptr;
         Node *next = nullptr;
         do {
             head = head_.load(std::memory_order_acquire);
             if (head == nullptr) {
-                retire(nullptr);
                 return std::nullopt;
             }
             next = head->next_;
         } while (!head_.compare_exchange_weak(head, next, std::memory_order_relaxed));
-        T val = head->val;
-        retire(head);
-        return val;
-    }
-private:
-    void retire_list(Node* head) {
-        while (head != nullptr) {
-            auto t = head;
-            head = head->retired_next_;
-            delete t;
-        }
-    }
-
-    void retire(Node* node) {
-        if (node != nullptr) {
-            Node *rhead = retired_list_.load();
-            do {
-                node->retired_next_ = rhead;
-            } while (!retired_list_.compare_exchange_weak(rhead, node));
-        }
-        if (active_counter_.load() == 1) {
-            Node *rhead = retired_list_.exchange(nullptr);
-            int old = active_counter_.fetch_sub(1);
-            if (rhead == nullptr) {
-                return;
-            }
-            if (old == 1) {
-                retire_list(rhead);
-                return;
-            }
-            Node* retire_it = rhead;
-            while (retire_it->retired_next_ != nullptr) {
-                retire_it = retire_it->retired_next_;
-            }
-            Node* new_retire_list = retired_list_.load();
-            do {
-                retire_it->retired_next_ = new_retire_list;
-            } while (!retired_list_.compare_exchange_weak(new_retire_list, rhead));
-        } else {
-            active_counter_.fetch_sub(1);
-        }
+        retireRAII.SetNode(head);
+        return std::move(head->val);
     }
 
 private:

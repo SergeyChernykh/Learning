@@ -97,6 +97,8 @@ set(TSTACK_TEST_SCENARIOS
     empty
     lifo
     reuse_after_empty
+    move_only_value
+    throwing_move_reclaims_popped_node
     destructor_reclaims_remaining_nodes
     pop_reclaims_retired_node_on_destruction
     concurrent_pop_reclaims_nodes_on_destruction

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -56,6 +57,52 @@ private:
 
 std::atomic<int> LifetimeTracked::alive_ {0};
 
+class ThrowingMoveTracked {
+public:
+    explicit ThrowingMoveTracked(int value = 0) : value_(value)
+    {
+        ++alive_;
+    }
+
+    ThrowingMoveTracked(const ThrowingMoveTracked &) = delete;
+    ThrowingMoveTracked &operator=(const ThrowingMoveTracked &) = delete;
+
+    ThrowingMoveTracked(ThrowingMoveTracked &&other) : value_(other.value_)
+    {
+        if (throw_on_move_) {
+            throw MoveFailure {};
+        }
+        ++alive_;
+    }
+
+    ThrowingMoveTracked &operator=(ThrowingMoveTracked &&) = delete;
+
+    ~ThrowingMoveTracked()
+    {
+        --alive_;
+    }
+
+    static void set_throw_on_move(bool enabled)
+    {
+        throw_on_move_ = enabled;
+    }
+
+    static int alive()
+    {
+        return alive_;
+    }
+
+    struct MoveFailure {};
+
+private:
+    int value_;
+    static int alive_;
+    static bool throw_on_move_;
+};
+
+int ThrowingMoveTracked::alive_ = 0;
+bool ThrowingMoveTracked::throw_on_move_ = false;
+
 [[noreturn]] void fail(const std::string &message)
 {
     throw std::runtime_error(message);
@@ -102,6 +149,44 @@ void test_reuse_after_empty()
     stack.push(2);
     require(stack.try_pop() == 2, "failed to reuse the emptied stack");
     require(!stack.try_pop(), "reused stack did not become empty");
+}
+
+void test_move_only_value()
+{
+    TStack<std::unique_ptr<int>> stack;
+    stack.push(std::make_unique<int>(42));
+
+    auto popped = stack.try_pop();
+    require(popped && **popped == 42,
+            "try_pop() must move a move-only value out of the node");
+    require(!stack.try_pop(),
+            "the stack must be empty after popping a move-only value");
+}
+
+void test_throwing_move_reclaims_popped_node()
+{
+    require(ThrowingMoveTracked::alive() == 0,
+            "the throwing-move lifetime counter must start at zero");
+
+    TStack<ThrowingMoveTracked> stack;
+    stack.push(ThrowingMoveTracked {42});
+    require(ThrowingMoveTracked::alive() == 1,
+            "the stack must own the value before try_pop()");
+
+    ThrowingMoveTracked::set_throw_on_move(true);
+    bool move_threw = false;
+    try {
+        (void)stack.try_pop();
+    } catch (const ThrowingMoveTracked::MoveFailure &) {
+        move_threw = true;
+    }
+    ThrowingMoveTracked::set_throw_on_move(false);
+
+    require(move_threw, "try_pop() must propagate a move failure");
+    require(ThrowingMoveTracked::alive() == 0,
+            "a failed move must not leak the removed node");
+    require(!stack.try_pop(),
+            "the node is logically removed even when moving its value fails");
 }
 
 void test_destructor_reclaims_remaining_nodes()
@@ -357,6 +442,10 @@ int main(int argc, char **argv)
             test_lifo();
         } else if (scenario == "reuse_after_empty") {
             test_reuse_after_empty();
+        } else if (scenario == "move_only_value") {
+            test_move_only_value();
+        } else if (scenario == "throwing_move_reclaims_popped_node") {
+            test_throwing_move_reclaims_popped_node();
         } else if (scenario == "destructor_reclaims_remaining_nodes") {
             test_destructor_reclaims_remaining_nodes();
         } else if (scenario == "pop_reclaims_retired_node_on_destruction") {

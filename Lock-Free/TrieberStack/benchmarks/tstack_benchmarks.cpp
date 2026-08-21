@@ -22,6 +22,8 @@ struct Options {
     std::size_t iterations = 100'000;
     std::size_t threads = 4;
     std::size_t rounds = 5;
+    std::string benchmark = "all";
+    bool scaling = false;
     bool csv = false;
 };
 
@@ -62,7 +64,7 @@ private:
     throw std::invalid_argument(
         message +
         "\nusage: tstack_benchmarks [--iterations N] [--threads N] "
-        "[--rounds N] [--csv]");
+        "[--rounds N] [--benchmark NAME] [--scaling] [--csv]");
 }
 
 std::size_t parse_positive(const char *text, const std::string &option)
@@ -86,6 +88,13 @@ Options parse_options(int argc, char **argv)
         const std::string argument = argv[index];
         if (argument == "--csv") {
             options.csv = true;
+        } else if (argument == "--scaling") {
+            options.scaling = true;
+        } else if (argument == "--benchmark") {
+            if (index + 1 >= argc) {
+                usage_error("missing value for " + argument);
+            }
+            options.benchmark = argv[++index];
         } else if (argument == "--iterations" || argument == "--threads" ||
                    argument == "--rounds") {
             if (index + 1 >= argc) {
@@ -102,19 +111,61 @@ Options parse_options(int argc, char **argv)
         } else if (argument == "--help" || argument == "-h") {
             std::cout
                 << "usage: tstack_benchmarks [--iterations N] [--threads N] "
-                   "[--rounds N] [--csv]\n\n"
-                << "iterations are per worker; mixed mode uses half of the "
-                   "threads as producers\n";
+                   "[--rounds N] [--benchmark NAME] [--scaling] [--csv]\n\n"
+                << "benchmarks: all, sequential_push, sequential_pop,\n"
+                   "  sequential_push_pop, sequential_empty_pop,\n"
+                   "  parallel_push, parallel_pop, parallel_push_pop,\n"
+                   "  parallel_empty_pop\n\n"
+                << "iterations are per worker; --scaling runs parallel "
+                   "benchmarks at powers of two up to --threads. Mixed mode "
+                   "is omitted for one worker.\n";
             std::exit(EXIT_SUCCESS);
         } else {
             usage_error("unknown option: " + argument);
         }
     }
 
-    if (options.threads < 2) {
-        usage_error("--threads must be at least 2");
+    const std::vector<std::string> benchmark_names {
+        "all",
+        "sequential_push",
+        "sequential_pop",
+        "sequential_push_pop",
+        "sequential_empty_pop",
+        "parallel_push",
+        "parallel_pop",
+        "parallel_push_pop",
+        "parallel_empty_pop",
+    };
+    if (std::find(benchmark_names.begin(), benchmark_names.end(),
+                  options.benchmark) == benchmark_names.end()) {
+        usage_error("unknown benchmark: " + options.benchmark);
     }
     return options;
+}
+
+bool selected(const Options &options, const std::string &name)
+{
+    return options.benchmark == "all" || options.benchmark == name;
+}
+
+std::vector<std::size_t> worker_counts(const Options &options)
+{
+    if (!options.scaling) {
+        return {options.threads};
+    }
+
+    std::vector<std::size_t> counts;
+    for (std::size_t count = 1; count < options.threads;) {
+        counts.push_back(count);
+        if (count > options.threads / 2) {
+            break;
+        }
+        count *= 2;
+    }
+    if (counts.empty() || counts.back() != options.threads) {
+        counts.push_back(options.threads);
+    }
+    return counts;
 }
 
 std::uint64_t expected_sum(std::uint64_t count)
@@ -186,6 +237,19 @@ Sample sequential_push_pop(std::size_t iterations)
         throw std::runtime_error("sequential_push_pop: invalid result");
     }
     return sample;
+}
+
+Sample sequential_empty_pop(std::size_t iterations)
+{
+    TStack<std::uint64_t> stack;
+    return measure(iterations, [&] {
+        for (std::size_t index = 0; index < iterations; ++index) {
+            if (stack.try_pop()) {
+                throw std::runtime_error(
+                    "sequential_empty_pop: non-empty result");
+            }
+        }
+    });
 }
 
 Sample parallel_push(std::size_t iterations, std::size_t thread_count)
@@ -343,17 +407,56 @@ Sample parallel_push_pop(std::size_t iterations, std::size_t thread_count)
     };
 }
 
+Sample parallel_empty_pop(std::size_t iterations, std::size_t thread_count)
+{
+    TStack<std::uint64_t> stack;
+    StartGate gate;
+    std::atomic<bool> failed {false};
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+
+    for (std::size_t id = 0; id < thread_count; ++id) {
+        threads.emplace_back([&] {
+            gate.arrive_and_wait();
+            for (std::size_t index = 0; index < iterations; ++index) {
+                if (stack.try_pop()) {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    gate.wait_until_ready(thread_count);
+    const auto begin = Clock::now();
+    gate.open();
+    for (auto &thread : threads) {
+        thread.join();
+    }
+    const auto end = Clock::now();
+
+    if (failed.load(std::memory_order_relaxed)) {
+        throw std::runtime_error("parallel_empty_pop: non-empty result");
+    }
+
+    return {
+        iterations * thread_count,
+        std::chrono::duration<double>(end - begin).count(),
+    };
+}
+
 struct Result {
     std::string name;
+    std::size_t workers;
     std::uint64_t operations;
     std::vector<double> rates;
 };
 
 template <class Benchmark>
-Result run_rounds(const std::string &name, std::size_t rounds,
+Result run_rounds(const std::string &name, std::size_t workers,
+                  std::size_t rounds,
                   Benchmark &&benchmark)
 {
-    Result result {name, 0, {}};
+    Result result {name, workers, 0, {}};
     result.rates.reserve(rounds);
     for (std::size_t round = 0; round < rounds; ++round) {
         const auto sample = benchmark();
@@ -366,15 +469,17 @@ Result run_rounds(const std::string &name, std::size_t rounds,
 void print_results(std::vector<Result> results, const Options &options)
 {
     if (options.csv) {
-        std::cout << "benchmark,operations,median_ops_per_sec,min_ops_per_sec,"
-                     "max_ops_per_sec\n";
+        std::cout << "benchmark,workers,operations,median_ops_per_sec,"
+                     "median_ns_per_op,min_ops_per_sec,max_ops_per_sec\n";
     } else {
         std::cout << "iterations/worker=" << options.iterations
                   << " threads=" << options.threads
                   << " rounds=" << options.rounds << "\n\n";
         std::cout << std::left << std::setw(25) << "benchmark"
-                  << std::right << std::setw(14) << "operations"
+                  << std::right << std::setw(10) << "workers"
+                  << std::setw(14) << "operations"
                   << std::setw(18) << "median ops/s"
+                  << std::setw(16) << "median ns/op"
                   << std::setw(18) << "min ops/s"
                   << std::setw(18) << "max ops/s" << '\n';
     }
@@ -384,16 +489,23 @@ void print_results(std::vector<Result> results, const Options &options)
         const auto median = result.rates[result.rates.size() / 2];
         const auto minimum = result.rates.front();
         const auto maximum = result.rates.back();
+        const auto nanoseconds_per_operation = 1'000'000'000.0 / median;
 
         if (options.csv) {
-            std::cout << result.name << ',' << result.operations << ','
-                      << std::fixed << std::setprecision(0) << median << ','
-                      << minimum << ',' << maximum << '\n';
+            std::cout << result.name << ',' << result.workers << ','
+                      << result.operations << ',' << std::fixed
+                      << std::setprecision(0) << median << ','
+                      << std::setprecision(2) << nanoseconds_per_operation
+                      << ',' << std::setprecision(0) << minimum << ','
+                      << maximum << '\n';
         } else {
             std::cout << std::left << std::setw(25) << result.name
-                      << std::right << std::setw(14) << result.operations
+                      << std::right << std::setw(10) << result.workers
+                      << std::setw(14) << result.operations
                       << std::setw(18) << std::fixed << std::setprecision(0)
-                      << median << std::setw(18) << minimum << std::setw(18)
+                      << median << std::setw(16) << std::setprecision(2)
+                      << nanoseconds_per_operation << std::setw(18)
+                      << std::setprecision(0) << minimum << std::setw(18)
                       << maximum << '\n';
         }
     }
@@ -406,26 +518,54 @@ int main(int argc, char **argv)
     try {
         const auto options = parse_options(argc, argv);
         std::vector<Result> results;
-        results.push_back(run_rounds("sequential_push", options.rounds, [&] {
-            return sequential_push(options.iterations);
-        }));
-        results.push_back(run_rounds("sequential_pop", options.rounds, [&] {
-            return sequential_pop(options.iterations);
-        }));
-        results.push_back(
-            run_rounds("sequential_push_pop", options.rounds, [&] {
+        if (selected(options, "sequential_push")) {
+            results.push_back(run_rounds(
+                "sequential_push", 1, options.rounds,
+                [&] { return sequential_push(options.iterations); }));
+        }
+        if (selected(options, "sequential_pop")) {
+            results.push_back(run_rounds(
+                "sequential_pop", 1, options.rounds,
+                [&] { return sequential_pop(options.iterations); }));
+        }
+        if (selected(options, "sequential_push_pop")) {
+            results.push_back(run_rounds(
+                "sequential_push_pop", 1, options.rounds, [&] {
                 return sequential_push_pop(options.iterations);
             }));
-        results.push_back(run_rounds("parallel_push", options.rounds, [&] {
-            return parallel_push(options.iterations, options.threads);
-        }));
-        results.push_back(run_rounds("parallel_pop", options.rounds, [&] {
-            return parallel_pop(options.iterations, options.threads);
-        }));
-        results.push_back(
-            run_rounds("parallel_push_pop", options.rounds, [&] {
-                return parallel_push_pop(options.iterations, options.threads);
-            }));
+        }
+        if (selected(options, "sequential_empty_pop")) {
+            results.push_back(run_rounds(
+                "sequential_empty_pop", 1, options.rounds,
+                [&] { return sequential_empty_pop(options.iterations); }));
+        }
+
+        for (const auto workers : worker_counts(options)) {
+            if (selected(options, "parallel_push")) {
+                results.push_back(run_rounds(
+                    "parallel_push", workers, options.rounds, [&] {
+                        return parallel_push(options.iterations, workers);
+                    }));
+            }
+            if (selected(options, "parallel_pop")) {
+                results.push_back(run_rounds(
+                    "parallel_pop", workers, options.rounds, [&] {
+                        return parallel_pop(options.iterations, workers);
+                    }));
+            }
+            if (selected(options, "parallel_push_pop") && workers >= 2) {
+                results.push_back(run_rounds(
+                    "parallel_push_pop", workers, options.rounds, [&] {
+                        return parallel_push_pop(options.iterations, workers);
+                    }));
+            }
+            if (selected(options, "parallel_empty_pop")) {
+                results.push_back(run_rounds(
+                    "parallel_empty_pop", workers, options.rounds, [&] {
+                        return parallel_empty_pop(options.iterations, workers);
+                    }));
+            }
+        }
         print_results(std::move(results), options);
     } catch (const std::exception &error) {
         std::cerr << "benchmark failed: " << error.what() << '\n';

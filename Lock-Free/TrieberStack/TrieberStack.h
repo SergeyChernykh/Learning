@@ -18,7 +18,7 @@ class TStack {
         RetireRAII(std::atomic<int>& active_counter, std::atomic<Node*>& retired_list) :
             active_counter_(active_counter),
             retired_list_(retired_list) {
-            active_counter_.fetch_add(1);
+            active_counter_.fetch_add(1, std::memory_order_acquire);
             }
         RetireRAII(const RetireRAII&) = delete;
         RetireRAII(RetireRAII&&) = delete;
@@ -30,14 +30,14 @@ class TStack {
 
         ~RetireRAII() {
             if (node_ != nullptr) {
-                Node *rhead = retired_list_.load();
+                Node *rhead = retired_list_.load(std::memory_order_relaxed);
                 do {
                     node_->retired_next_ = rhead;
-                } while (!retired_list_.compare_exchange_weak(rhead, node_));
+                } while (!retired_list_.compare_exchange_weak(rhead, node_, std::memory_order_release, std::memory_order_relaxed));
             }
-            if (active_counter_.load() == 1) {
-                Node *rhead = retired_list_.exchange(nullptr);
-                int old = active_counter_.fetch_sub(1);
+            if (active_counter_.load(std::memory_order_relaxed) == 1) {
+                Node *rhead = retired_list_.exchange(nullptr, std::memory_order_acquire);
+                int old = active_counter_.fetch_sub(1, std::memory_order_acq_rel);
                 if (rhead == nullptr) {
                     return;
                 }
@@ -49,12 +49,12 @@ class TStack {
                 while (retire_it->retired_next_ != nullptr) {
                     retire_it = retire_it->retired_next_;
                 }
-                Node* new_retire_list = retired_list_.load();
+                Node* new_retire_list = retired_list_.load(std::memory_order_acquire);
                 do {
                     retire_it->retired_next_ = new_retire_list;
-                } while (!retired_list_.compare_exchange_weak(new_retire_list, rhead));
+                } while (!retired_list_.compare_exchange_weak(new_retire_list, rhead, std::memory_order_release, std::memory_order_relaxed));
             } else {
-                active_counter_.fetch_sub(1);
+                active_counter_.fetch_sub(1, std::memory_order_release);
             }
         }
         private:
@@ -103,7 +103,7 @@ public:
         Node *head = head_.load(std::memory_order_relaxed);
         do {
             node->next_ = head;
-        } while (!head_.compare_exchange_weak(head, node, std::memory_order_release));
+        } while (!head_.compare_exchange_weak(head, node, std::memory_order_release, std::memory_order_relaxed));
         return;
     }
 
@@ -117,7 +117,7 @@ public:
                 return std::nullopt;
             }
             next = head->next_;
-        } while (!head_.compare_exchange_weak(head, next, std::memory_order_relaxed));
+        } while (!head_.compare_exchange_weak(head, next, std::memory_order_relaxed, std::memory_order_relaxed));
         retireRAII.SetNode(head);
         return std::move(head->val);
     }

@@ -21,6 +21,17 @@ if(BUILD_BENCHMARKS)
     add_executable(tstack_benchmarks benchmarks/tstack_benchmarks.cpp)
     target_compile_features(tstack_benchmarks PRIVATE cxx_std_17)
     target_link_libraries(tstack_benchmarks PRIVATE Threads::Threads)
+
+    add_test(
+        NAME tstack.benchmark.smoke
+        COMMAND tstack_benchmarks
+            --iterations 100
+            --threads 2
+            --rounds 1
+            --scaling
+            --csv
+    )
+    set_tests_properties(tstack.benchmark.smoke PROPERTIES TIMEOUT 30)
 endif()
 
 if(ENABLE_ASAN)

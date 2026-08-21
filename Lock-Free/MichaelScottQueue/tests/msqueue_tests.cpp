@@ -14,7 +14,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr int kItemsPerProducer = 4'000;
+constexpr int kItemsPerProducer = 4000;
 constexpr int kProducerCount = 4;
 constexpr int kConsumerCount = 4;
 

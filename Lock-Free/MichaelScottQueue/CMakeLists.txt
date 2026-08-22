@@ -7,6 +7,7 @@ find_package(Threads REQUIRED)
 
 option(ENABLE_TSAN "Build tests with ThreadSanitizer" OFF)
 option(ENABLE_ASAN "Build tests with AddressSanitizer and UBSan" OFF)
+option(BUILD_BENCHMARKS "Build MSQueue benchmarks" ON)
 
 function(configure_msqueue_target target)
     target_compile_features(${target} PRIVATE cxx_std_17)
@@ -16,6 +17,25 @@ endfunction()
 
 add_executable(msqueue_tests tests/msqueue_tests.cpp)
 configure_msqueue_target(msqueue_tests)
+
+if(BUILD_BENCHMARKS)
+    add_executable(msqueue_benchmarks benchmarks/msqueue_benchmarks.cpp)
+    configure_msqueue_target(msqueue_benchmarks)
+
+    foreach(benchmark IN ITEMS sequential spsc mpmc)
+        add_test(
+            NAME "msqueue.benchmark.${benchmark}.smoke"
+            COMMAND msqueue_benchmarks
+                --benchmark "${benchmark}"
+                --iterations 1000
+                --producers 2
+                --consumers 2
+                --csv
+        )
+        set_tests_properties("msqueue.benchmark.${benchmark}.smoke"
+            PROPERTIES TIMEOUT 30)
+    endforeach()
+endif()
 
 if(ENABLE_ASAN)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

@@ -110,6 +110,57 @@ make run TEST=sequential_fifo
 
 Также доступны `make asan`, `make tsan`, `make clean` и `make help`.
 
+## Бенчмарки времени и памяти
+
+Всегда используй оптимизированную сборку. Одна команда собирает Release-цель и
+запускает последовательную, SPSC и MPMC-нагрузки отдельными процессами:
+
+```bash
+make benchmark
+```
+
+Количество элементов задаётся так:
+
+```bash
+make benchmark \
+    BENCHMARK_ITERATIONS=1000000 \
+    BENCHMARK_PRODUCERS=4 \
+    BENCHMARK_CONSUMERS=4
+```
+
+`BENCHMARK_ITERATIONS` означает количество элементов на одного producer. В
+MPMC-сценарии суммарное количество элементов равно произведению iterations и
+числа producer.
+
+Один сценарий можно запустить отдельно:
+
+```bash
+make benchmark-one BENCH=mpmc BENCHMARK_ITERATIONS=1000000
+```
+
+Бенчмарк выводит elapsed time, throughput, среднее время одной операции,
+текущий RSS до/после нагрузки и peak RSS. Одна операция — один `push()` или
+один успешный `try_pop()`, поэтому на элемент приходится две операции.
+
+Память читается из Linux `/proc/self/status`. Это память всего процесса,
+включая allocator и служебные структуры потоков. Значение RSS снимается пока
+очередь ещё жива: на этапе 1 удалённые dummy-узлы намеренно удерживаются до
+деструктора. Для сравнения памяти запускай каждый workload отдельным процессом,
+как это делает `make benchmark`, потому что peak RSS нельзя сбросить внутри
+процесса.
+
+Для машинной обработки доступна CSV-строка:
+
+```bash
+./build-release/msqueue_benchmarks \
+    --benchmark mpmc --iterations 1000000 \
+    --producers 4 --consumers 4 --csv
+```
+
+Порядок столбцов: `benchmark,items,operations,producers,consumers,seconds,`
+`ops_per_second,ns_per_operation,rss_before_kib,rss_after_kib,rss_delta_kib,`
+`peak_rss_after_kib,peak_rss_delta_kib`.
+
 Эквивалентные команды CMake вручную:
 
 ```bash

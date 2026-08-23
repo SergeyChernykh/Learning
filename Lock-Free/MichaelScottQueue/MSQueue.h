@@ -11,8 +11,8 @@ class MSQueue {
         T val;
         std::atomic<Node*> next = nullptr;
     };
-    std::atomic<Node*> head_ {nullptr};
-    std::atomic<Node*> tail_ {nullptr};
+    alignas(64) std::atomic<Node*> head_ {nullptr};
+    alignas(64) std::atomic<Node*> tail_ {nullptr};
     Node *ownership_head_ {nullptr};
 
 public:

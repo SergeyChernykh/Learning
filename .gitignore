@@ -7,3 +7,5 @@
 **/a.out
 *.o
 
+# Standalone algorithm executable
+/algos/arbitrage
